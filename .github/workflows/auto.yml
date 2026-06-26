@@ -1,0 +1,107 @@
+name: OpenWrt Build Factory (Quota Safe)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "build mode"
+        type: choice
+        default: batch1
+        options:
+          - batch1
+          - batch2
+          - batch3
+          - full
+
+  schedule:
+    - cron: "0 2 */3 * *"   # 每3天触发一次 batch1
+
+permissions:
+  contents: write
+  actions: read
+
+# =========================
+# 🧠 分批策略（关键）
+# =========================
+env:
+  BATCH1: "x64_immwrt n1_immwrt redmi_ax6_immwrt jdcloud_ipq60xx_immwrt"
+  BATCH2: "jdcloud_ax6000_immwrt cmcc_rax3000m_immwrt qihoo_360v6_immwrt"
+  BATCH3: "aliyun_ap8220_immwrt aliyun_ap8220_libwrt zn_m2_immwrt zn_m2_libwrt"
+  FULL: "aliyun_ap8220_immwrt aliyun_ap8220_libwrt cmcc_rax3000m_immwrt gemtek_w1701k_immwrt jdcloud_ax6000_immwrt jdcloud_ipq60xx_immwrt jdcloud_ipq60xx_libwrt link_nn6000v2_immwrt linksys_mx4x00_immwrt n1_immwrt qihoo_360v6_immwrt redmi_ax5_immwrt redmi_ax6_immwrt redmi_ax6_libwrt redmi_ax6000_immwrt21 zn_m2_immwrt zn_m2_libwrt x64_immwrt"
+
+jobs:
+
+  # =========================
+  # 🧠 选择批次
+  # =========================
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      models: ${{ steps.set.outputs.models }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.mode }}" = "batch1" ] || [ -z "${{ inputs.mode }}" ]; then
+            echo "models=${{ env.BATCH1 }}" >> $GITHUB_OUTPUT
+
+          elif [ "${{ inputs.mode }}" = "batch2" ]; then
+            echo "models=${{ env.BATCH2 }}" >> $GITHUB_OUTPUT
+
+          elif [ "${{ inputs.mode }}" = "batch3" ]; then
+            echo "models=${{ env.BATCH3 }}" >> $GITHUB_OUTPUT
+
+          else
+            echo "models=${{ env.FULL }}" >> $GITHUB_OUTPUT
+          fi
+
+  # =========================
+  # ⚡ 限并发核心（关键）
+  # =========================
+  build:
+    needs: prepare
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+
+      # 🔥 关键：限制并发
+      max-parallel: 2
+
+      matrix:
+        model: ${{ fromJSON('["' + join(needs.prepare.outputs.models, '","') + '"]') }}
+
+    steps:
+
+      - name: Setup
+        run: |
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo -E apt -yqq install dos2unix libfuse-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          echo "Building: ${{ matrix.model }}"
+          ./wrt_core/pre_clone_action.sh ${{ matrix.model }}
+          ./build.sh ${{ matrix.model }}
+
+      - name: Collect
+        run: |
+          mkdir -p release/${{ matrix.model }}
+          cp -rf firmware/* release/${{ matrix.model }}/ || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fw-${{ matrix.model }}
+          path: release/${{ matrix.model }}
+
+      - name: Release per model
+        uses: softprops/action-gh-release@v2.5.0
+        with:
+          tag_name: ${{ matrix.model }}_${{ github.run_id }}
+          name: ${{ matrix.model }} build
+          files: release/${{ matrix.model }}/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
